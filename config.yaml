@@ -1,0 +1,32 @@
+# Wavy-Channel CFD Simulation Configuration
+# All SI units unless noted otherwise.
+
+# ── Geometry ─────────────────────────────────────────────────────────────────
+H:      0.010       # channel height [m]
+L:      0.060       # channel length [m]
+lambda: 0.010       # corrugation wavelength [m]
+
+# ── Thermal boundary condition ────────────────────────────────────────────────
+q_flux: 5000        # bottom-wall heat flux [W/m²]
+
+# ── Fluid properties (liquid water, ~20 °C) ───────────────────────────────────
+rho:  998.0         # density [kg/m³]
+mu:   0.001         # dynamic viscosity [Pa·s]
+k_f:  0.6           # thermal conductivity [W/(m·K)]
+Cp:   4182.0        # specific heat capacity [J/(kg·K)]
+
+# ── Parameter sweep lists ─────────────────────────────────────────────────────
+Re_list:  [100, 200, 400, 600, 800, 1200]   # Reynolds numbers
+AR_list:  [0.0, 0.05, 0.10, 0.20, 0.30]    # amplitude ratios (a/H)
+phi_list: [0, 45, 90, 135, 180]             # phase offsets [degrees]
+
+# ── Mesh resolution (defaults) ────────────────────────────────────────────────
+nx: 80              # cells in streamwise direction
+ny: 40              # cells in wall-normal direction
+
+# ── Solver settings ───────────────────────────────────────────────────────────
+max_iter:  2000     # maximum SIMPLE outer iterations
+tol:       1.0e-6   # convergence tolerance (L1 residual)
+alpha_u:   0.7      # velocity under-relaxation factor
+alpha_p:   0.3      # pressure under-relaxation factor
+alpha_T:   0.9      # temperature under-relaxation factor
