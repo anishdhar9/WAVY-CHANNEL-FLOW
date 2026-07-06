@@ -6,7 +6,8 @@ temperature fields produced by the SIMPLE solver.
 
 Responsibilities:
   - Compute the local and average Nusselt number (Nu) along the heated wall
-    using the bulk temperature and the wall heat flux.
+    using the bulk temperature and the wall heat flux, referenced to the
+    *local* hydraulic diameter (the wavy channel's gap varies with x).
   - Compute the Fanning friction factor (f) and the overall pressure drop
     (dP) between inlet and outlet.
   - Evaluate the thermal performance factor (TPF) and performance evaluation
@@ -35,22 +36,25 @@ def bulk_temperature(T: np.ndarray, u: np.ndarray,
 
 
 def local_nusselt(T_wall: np.ndarray, T_bulk: np.ndarray,
-                  q_flux: float, k_f: float, H: float) -> np.ndarray:
+                  q_flux: float, k_f: float,
+                  Dh_local: np.ndarray) -> np.ndarray:
     """Return the local Nusselt number profile along the heated bottom wall.
 
-    Nu(x) = q_flux * D_h / (k_f * (T_wall - T_bulk))
+    Nu(x) = q_flux * Dh_local(x) / (k_f * (T_wall(x) - T_bulk(x)))
 
     Parameters
     ----------
-    T_wall : (nx,) wall temperature array [K]
-    T_bulk : (nx,) bulk temperature array [K]
-    q_flux : bottom-wall heat flux [W/m²]
-    k_f    : fluid thermal conductivity [W/(m·K)]
-    H      : channel height for D_h = 2*H [m]
+    T_wall   : (nx,) wall temperature array [K]
+    T_bulk   : (nx,) bulk temperature array [K]
+    q_flux   : bottom-wall heat flux [W/m²]
+    k_f      : fluid thermal conductivity [W/(m·K)]
+    Dh_local : (nx,) LOCAL hydraulic diameter Dh(x) = 2 * gap(x) [m] — the
+               wavy channel's wall-to-wall gap varies with x, so a single
+               scalar Dh (as used for the domain length or the mean height)
+               is not the right length scale at each streamwise station.
     """
-    D_h = 2.0 * H
-    dT  = np.where(T_wall - T_bulk > 1e-6, T_wall - T_bulk, 1e-6)
-    return q_flux * D_h / (k_f * dT)
+    dT = np.where(T_wall - T_bulk > 1e-6, T_wall - T_bulk, 1e-6)
+    return q_flux * Dh_local / (k_f * dT)
 
 
 def average_nusselt(nu_local: np.ndarray) -> float:
@@ -70,7 +74,7 @@ def friction_factor(p: np.ndarray, rho: float, u_mean: float,
     rho    : fluid density [kg/m³]
     u_mean : mean inlet velocity [m/s]
     L      : channel length [m]
-    H      : channel height [m]
+    H      : mean channel height [m]  (Dh = 2*H for parallel plates)
     """
     p_in  = float(np.mean(p[:, 0]))
     p_out = float(np.mean(p[:, -1]))
@@ -93,41 +97,44 @@ def thermal_performance_factor(Nu_wavy: float, Nu_straight: float,
     return (Nu_wavy / Nu_straight) / (f_wavy / f_straight) ** (1.0 / 3.0)
 
 
-def extract_all(fields: dict, mesh: dict, fluid: dict,
-                bc: dict, geometry: dict) -> dict:
+def extract_all(fields: dict, mesh, fluid, bc, geom) -> dict:
     """Convenience wrapper: compute all metrics and return a flat dict.
 
     Parameters
     ----------
-    fields   : dict with keys u, v, p, T (2-D arrays from solver)
-    mesh     : dict from mesh.mesh_gen.generate_mesh
-    fluid    : dict from solver.fluid_properties.get_properties
-    bc       : dict from solver.boundary_conditions.build_bc
-    geometry : dict from geometry.channel_gen.build_channel
+    fields : dict with keys u, v, p, T (2-D (ny,nx) arrays from solver)
+    mesh   : a mesh.mesh_gen.StructuredMesh instance
+    fluid  : a solver.fluid_properties.FluidProperties instance
+    bc     : a solver.boundary_conditions.BoundaryConditions instance
+    geom   : a geometry.channel_gen.ChannelGeometry instance
 
     Returns
     -------
-    metrics dict with keys: Nu_avg, f, dP, T_wall_max, T_bulk_out, Re
+    metrics dict with keys: Re, Nu_avg, f, dP, T_wall_max, T_bulk_out
     """
-    u   = fields["u"]
-    T   = fields["T"]
-    p   = fields["p"]
-    dy  = mesh["cell_dy"]
+    u = fields["u"]
+    T = fields["T"]
+    p = fields["p"]
+
+    # Cell wall-normal height, (ny,nx) — averaged west/east face length,
+    # matching the convention used elsewhere in the legacy mesh dict.
+    dy = 0.5 * (mesh.face_len_west + mesh.face_len_east).T
 
     T_bulk = bulk_temperature(T, u, dy)
     T_wall = T[0, :]  # bottom-wall cell centres
 
-    nu_loc = local_nusselt(T_wall, T_bulk, bc["q_flux"], fluid["k_f"],
-                            geometry["x"][-1] - geometry["x"][0])  # use H equiv
+    x_stations = mesh.Xc[:, 0]                     # (nx,) streamwise stations
+    Dh_local = 2.0 * np.interp(x_stations, geom.x, geom.gap)
+
+    nu_loc = local_nusselt(T_wall, T_bulk, bc.q_flux, fluid.k_f, Dh_local)
     Nu_avg = average_nusselt(nu_loc)
-    f      = friction_factor(p, fluid["rho"], bc["u_in"],
-                              geometry["x"][-1], geometry["x"][-1])
+    f = friction_factor(p, fluid.rho, bc.u_inlet, geom.L, geom.H)
 
     return {
-        "Re":        bc["Re"],
-        "Nu_avg":    Nu_avg,
-        "f":         f,
-        "dP":        float(np.mean(p[:, 0]) - np.mean(p[:, -1])),
+        "Re":         bc.Re,
+        "Nu_avg":     Nu_avg,
+        "f":          f,
+        "dP":         float(np.mean(p[:, 0]) - np.mean(p[:, -1])),
         "T_wall_max": float(np.max(T_wall)),
         "T_bulk_out": float(T_bulk[-1]),
     }

@@ -36,21 +36,25 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
 
 def run_single(config: dict, Re: float, AR: float, phi: float) -> None:
     """Run a single CFD case and print key metrics."""
-    from wavy_channel_cfd.geometry.channel_gen import build_channel
-    from wavy_channel_cfd.mesh.mesh_gen import generate_mesh
-    from wavy_channel_cfd.solver.boundary_conditions import build_bc, summarise_bc
-    from wavy_channel_cfd.solver.fluid_properties import get_properties, print_properties
+    from wavy_channel_cfd.geometry.channel_gen import ChannelGeometry
+    from wavy_channel_cfd.mesh.mesh_gen import StructuredMesh
+    from wavy_channel_cfd.solver.boundary_conditions import BoundaryConditions
+    from wavy_channel_cfd.solver.fluid_properties import FluidProperties
     from wavy_channel_cfd.solver.simple import solve
     from wavy_channel_cfd.postprocess.extract_metrics import extract_all
 
-    fluid  = get_properties(config)
-    geom   = build_channel(config["H"], config["L"], AR,
-                            config["lambda"], phi)
-    mesh   = generate_mesh(geom, nx=80, ny=40)
-    bc     = build_bc(Re, config["H"], config["q_flux"], fluid)
+    fluid = FluidProperties(rho=config["rho"], mu=config["mu"],
+                            k_f=config["k_f"], Cp=config["Cp"])
+    geom  = ChannelGeometry(L=config["L"], H=config["H"], lam=config["lambda"],
+                            AR=AR, phi_deg=phi)
+    geom.check_validity()
+    mesh  = StructuredMesh.for_yplus(geom, Re=Re, rho=fluid.rho, mu=fluid.mu,
+                                     y_plus=1.0, nx=80, ny=40)
+    bc    = BoundaryConditions(fluid, Re=Re, q_flux=config["q_flux"],
+                               Dh=2.0 * config["H"])
 
-    print_properties(fluid)
-    summarise_bc(bc)
+    fluid.print_summary()
+    bc.summary()
 
     u, v, p, T, monitor = solve(mesh, bc, fluid,
                                  {"max_iter": 1000, "tol": 1e-6},

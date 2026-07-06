@@ -25,10 +25,10 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from wavy_channel_cfd.geometry.channel_gen import build_channel
-from wavy_channel_cfd.mesh.mesh_gen import generate_mesh
-from wavy_channel_cfd.solver.boundary_conditions import build_bc
-from wavy_channel_cfd.solver.fluid_properties import get_properties
+from wavy_channel_cfd.geometry.channel_gen import ChannelGeometry
+from wavy_channel_cfd.mesh.mesh_gen import StructuredMesh
+from wavy_channel_cfd.solver.boundary_conditions import BoundaryConditions
+from wavy_channel_cfd.solver.fluid_properties import FluidProperties
 from wavy_channel_cfd.solver.simple import solve
 from wavy_channel_cfd.postprocess.extract_metrics import extract_all
 
@@ -48,10 +48,14 @@ def _run_single_case(params: dict, config: dict,
     L   = config["L"]
     lam = config["lambda"]
 
-    fluid   = get_properties(config)
-    geom    = build_channel(H, L, AR, lam, phi_deg)
-    mesh    = generate_mesh(geom, nx=nx, ny=ny)
-    bc      = build_bc(Re, H, config["q_flux"], fluid)
+    fluid = FluidProperties(rho=config["rho"], mu=config["mu"],
+                            k_f=config["k_f"], Cp=config["Cp"])
+    geom  = ChannelGeometry(L=L, H=H, lam=lam, AR=AR, phi_deg=phi_deg)
+    geom.check_validity()
+    mesh  = StructuredMesh.for_yplus(geom, Re=Re, rho=fluid.rho, mu=fluid.mu,
+                                     y_plus=1.0, nx=nx, ny=ny)
+    bc    = BoundaryConditions(fluid, Re=Re, q_flux=config["q_flux"],
+                               Dh=2.0 * H)
 
     sp      = solver_params or {"max_iter": 500, "tol": 1e-5}
     u, v, p, T, _monitor = solve(mesh, bc, fluid, sp, verbose=False)

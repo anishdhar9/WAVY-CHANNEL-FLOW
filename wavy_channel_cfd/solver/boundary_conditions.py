@@ -261,6 +261,80 @@ class BoundaryConditions:
             self.apply_top_wall(u, v, T, mesh)
 
     # ------------------------------------------------------------------
+    # Matrix-form BC contribution (for the FV assembler in
+    # solver/discretization.py::assemble_transport_matrix)
+    # ------------------------------------------------------------------
+
+    def matrix_contribution(self, patch: BoundaryPatch, field_name: str) -> dict:
+        """Return the assembler-facing BC spec for one patch and field.
+
+        The *same* physical patch can be a different kind of condition
+        per transported field — e.g. ``wall_bottom`` is Dirichlet
+        (no-slip, value 0) for ``u``/``v`` but Neumann (prescribed heat
+        flux) for ``T``. This method is the single place that maps
+        ``BCType`` + field name to the ``{"kind", "value"/"flux"}`` spec
+        ``assemble_transport_matrix`` consumes.
+
+        Parameters
+        ----------
+        patch      : a BoundaryPatch from mesh.patches
+        field_name : one of "u", "v", "T"
+
+        Returns
+        -------
+        dict, one of:
+          {"kind": "dirichlet", "value": <scalar or (n_faces,) array>}
+          {"kind": "neumann",   "flux":  <scalar or (n_faces,) array>}
+          {"kind": "outflow"}
+        """
+        bt = patch.bc_type
+
+        if field_name in ("u", "v"):
+            if bt is BCType.VELOCITY_INLET:
+                u_in = float(patch.params.get("u_inlet", self.u_inlet))
+                value = u_in if field_name == "u" else 0.0
+                return {"kind": "dirichlet", "value": value}
+            if bt is BCType.PRESSURE_OUTLET:
+                return {"kind": "outflow"}
+            if bt.is_wall():
+                return {"kind": "dirichlet", "value": 0.0}
+            if bt is BCType.SYMMETRY:
+                return {"kind": "neumann", "flux": 0.0}
+            raise NotImplementedError(
+                f"No {field_name} BC mapping for {bt!r} on patch {patch.name!r}")
+
+        if field_name == "T":
+            if bt is BCType.VELOCITY_INLET:
+                T_in = float(patch.params.get("T_inlet", self.T_INLET))
+                return {"kind": "dirichlet", "value": T_in}
+            if bt is BCType.PRESSURE_OUTLET:
+                return {"kind": "outflow"}
+            if bt is BCType.WALL_HEATFLUX:
+                q = float(patch.params.get("q_flux", self.q_flux))
+                return {"kind": "neumann", "flux": q}
+            if bt is BCType.WALL_ADIABATIC:
+                return {"kind": "neumann", "flux": 0.0}
+            if bt is BCType.WALL_ISOTHERMAL:
+                if "T_wall" not in patch.params:
+                    raise ValueError(
+                        f"Patch {patch.name!r} is wall-isothermal but has "
+                        f"no 'T_wall' parameter")
+                return {"kind": "dirichlet", "value": float(patch.params["T_wall"])}
+            if bt is BCType.SYMMETRY:
+                return {"kind": "neumann", "flux": 0.0}
+            raise NotImplementedError(
+                f"No T BC mapping for {bt!r} on patch {patch.name!r}")
+
+        raise ValueError(f"Unknown field_name {field_name!r}; expected u, v, or T")
+
+    def build_bc_spec(self, mesh, field_name: str) -> dict:
+        """Build the full per-patch BC spec dict for one transported field,
+        ready to pass as ``bc=`` into ``assemble_transport_matrix``.
+        """
+        return {name: self.matrix_contribution(patch, field_name)
+                for name, patch in mesh.patches.items()}
+
+    # ------------------------------------------------------------------
     # y+ diagnostic
     # ------------------------------------------------------------------
 
@@ -456,5 +530,19 @@ if __name__ == "__main__":
     print("All patch-driven BC assertions passed.")
     for patch in smesh.patches.values():
         print(f"  {patch!r}")
+    print()
+
+    # ── matrix_contribution() / build_bc_spec() ──────────────────────
+    smesh.set_patch_bc("wall_top", BCType.WALL_ADIABATIC)  # reset from isothermal
+    spec_u = bc.build_bc_spec(smesh, "u")
+    spec_T = bc.build_bc_spec(smesh, "T")
+    assert spec_u["inlet"] == {"kind": "dirichlet", "value": bc.u_inlet}
+    assert spec_u["outlet"] == {"kind": "outflow"}
+    assert spec_u["wall_bottom"] == {"kind": "dirichlet", "value": 0.0}
+    assert spec_T["wall_bottom"] == {"kind": "neumann", "flux": bc.q_flux}
+    assert spec_T["wall_top"] == {"kind": "neumann", "flux": 0.0}
+    print("matrix_contribution()/build_bc_spec() dispatch correctly:")
+    print("  u-spec:", spec_u)
+    print("  T-spec:", spec_T)
 
     sys.exit(0)
