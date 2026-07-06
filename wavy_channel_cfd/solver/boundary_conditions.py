@@ -21,7 +21,18 @@ No arrays are allocated; no Python loops over cells.
 from __future__ import annotations
 import numpy as np
 
+from wavy_channel_cfd.mesh.boundary import BCType, BoundaryPatch
 from wavy_channel_cfd.solver.fluid_properties import FluidProperties
+
+
+# Field-array slices for each index-space side, in the (ny, nx) layout:
+# (boundary row/column, adjacent interior row/column)
+_SIDE_SLICES = {
+    "west":  (np.s_[:, 0],  np.s_[:, 1]),
+    "east":  (np.s_[:, -1], np.s_[:, -2]),
+    "south": (np.s_[0, :],  np.s_[1, :]),
+    "north": (np.s_[-1, :], np.s_[-2, :]),
+}
 
 
 class BoundaryConditions:
@@ -149,18 +160,105 @@ class BoundaryConditions:
         T[-1, :] = T[-2, :]
 
     # ------------------------------------------------------------------
-    # Convenience: apply all four faces at once
+    # Patch-based application (mesh-driven)
+    # ------------------------------------------------------------------
+
+    def apply_patch(self, patch: BoundaryPatch,
+                    u: np.ndarray, v: np.ndarray,
+                    p: np.ndarray, T: np.ndarray, mesh) -> None:
+        """Apply one boundary patch, dispatching on its BCType.
+
+        The patch's index-space ``side`` selects the field-array slice;
+        the ``bc_type`` selects the stencil. Patch ``params`` override
+        solver-level defaults (e.g. a per-patch ``q_flux`` or ``T_wall``).
+        """
+        b, n = _SIDE_SLICES[patch.side]     # boundary slice, neighbour slice
+        bt   = patch.bc_type
+
+        if bt is BCType.VELOCITY_INLET:
+            # Plug flow entering normal to the patch, into the domain.
+            u_in = float(patch.params.get("u_inlet", self.u_inlet))
+            T_in = float(patch.params.get("T_inlet", self.T_INLET))
+            sign = {"west": +1.0, "east": -1.0,
+                    "south": +1.0, "north": -1.0}[patch.side]
+            if patch.side in ("west", "east"):
+                u[b] = sign * u_in
+                v[b] = 0.0
+            else:
+                u[b] = 0.0
+                v[b] = sign * u_in
+            T[b] = T_in
+
+        elif bt is BCType.PRESSURE_OUTLET:
+            u[b] = u[n]
+            v[b] = v[n]
+            T[b] = T[n]
+            p[b] = float(patch.params.get("p_ref", 0.0))
+
+        elif bt.is_wall():
+            u[b] = 0.0
+            v[b] = 0.0
+            if bt is BCType.WALL_ADIABATIC:
+                T[b] = T[n]
+            elif bt is BCType.WALL_ISOTHERMAL:
+                if "T_wall" not in patch.params:
+                    raise ValueError(
+                        f"Patch {patch.name!r} is wall-isothermal but has "
+                        f"no 'T_wall' parameter")
+                T[b] = float(patch.params["T_wall"])
+            else:  # WALL_HEATFLUX
+                q = float(patch.params.get("q_flux", self.q_flux))
+                if patch.side == "south":
+                    dy = mesh.dy_wall_bottom
+                elif patch.side == "north":
+                    dy = mesh.dy_wall_top
+                else:
+                    raise NotImplementedError(
+                        f"Heat-flux wall on side {patch.side!r} is not "
+                        f"supported (no wall-normal spacing array)")
+                T[b] = T[n] + q * dy / self.fluid.k_f
+
+        elif bt is BCType.SYMMETRY:
+            # Zero normal velocity; zero-gradient tangential velocity and T.
+            if patch.side in ("west", "east"):
+                u[b] = 0.0
+                v[b] = v[n]
+            else:
+                v[b] = 0.0
+                u[b] = u[n]
+            T[b] = T[n]
+
+        else:  # pragma: no cover — new BCType without a stencil
+            raise NotImplementedError(f"No stencil for BC type {bt!r}")
+
+    # ------------------------------------------------------------------
+    # Convenience: apply all boundaries at once
     # ------------------------------------------------------------------
 
     def apply_all(self, u: np.ndarray, v: np.ndarray,
                   p: np.ndarray, T: np.ndarray, mesh) -> None:
-        """Apply all four boundary conditions in the canonical order:
-        inlet → outlet → bottom wall → top wall.
+        """Apply all boundary conditions.
+
+        If the mesh carries boundary patches (StructuredMesh), each patch
+        is applied according to its BCType — inlets/outlets first, walls
+        last, so walls win the corner cells (matching the legacy order
+        inlet → outlet → bottom wall → top wall).
+
+        Meshes without patches fall back to the four fixed-face methods.
         """
-        self.apply_inlet(u, v, T, mesh)
-        self.apply_outlet(u, v, p, T, mesh)
-        self.apply_bottom_wall(u, v, T, mesh)
-        self.apply_top_wall(u, v, T, mesh)
+        patches = getattr(mesh, "patches", None)
+        if patches:
+            ordered = ([pt for pt in patches.values()
+                        if not pt.bc_type.is_wall()]
+                       + [pt for pt in patches.values()
+                          if pt.bc_type.is_wall()])
+            for pt in ordered:
+                self.apply_patch(pt, u, v, p, T, mesh)
+        else:
+            self.apply_inlet(u, v, T, mesh)
+            self.apply_outlet(u, v, p, T, mesh)
+            self.apply_bottom_wall(u, v, T, mesh)
+            self.apply_top_wall(u, v, T, mesh)
 
     # ------------------------------------------------------------------
     # y+ diagnostic
@@ -324,5 +422,39 @@ if __name__ == "__main__":
     target_utau = np.sqrt(fluid.mu * bc.u_inlet / (H * fluid.rho))
     y_plus_est  = 2e-5 * target_utau / fluid.nu
     print(f"Estimated y⁺ for Re={Re}, h₁=20 µm: {y_plus_est:.4f}")
+    print()
+
+    # ── Patch-driven BC application on a real StructuredMesh ─────────
+    from wavy_channel_cfd.geometry.channel_gen import ChannelGeometry
+    from wavy_channel_cfd.mesh.mesh_gen import StructuredMesh
+
+    geom  = ChannelGeometry(L=0.060, H=H, lam=0.010, AR=0.10, phi_deg=90)
+    smesh = StructuredMesh.coarse(geom)
+    ny2, nx2 = smesh.ny, smesh.nx
+
+    u2 = np.random.default_rng(0).uniform(0.0, 0.1, (ny2, nx2))
+    v2 = np.zeros((ny2, nx2))
+    p2 = np.ones((ny2, nx2))
+    T2 = np.full((ny2, nx2), bc.T_INLET)
+
+    bc.apply_all(u2, v2, p2, T2, smesh)   # dispatches through smesh.patches
+
+    assert np.allclose(u2[1:-1, 0],  bc.u_inlet),  "patch inlet u failed"
+    assert np.allclose(p2[:, -1],    0.0),          "patch outlet p failed"
+    assert np.allclose(u2[0,  :],    0.0),          "patch bottom no-slip failed"
+    assert np.allclose(u2[-1, :],    0.0),          "patch top no-slip failed"
+    assert np.allclose(T2[-1, 1:-1], T2[-2, 1:-1]), "patch adiabatic failed"
+    T_exp = T2[1, :] + bc.q_flux * smesh.dy_wall_bottom / fluid.k_f
+    assert np.allclose(T2[0, :], T_exp),            "patch heat-flux failed"
+
+    # Isothermal override on the top wall
+    from wavy_channel_cfd.mesh.boundary import BCType
+    smesh.set_patch_bc("wall_top", BCType.WALL_ISOTHERMAL, T_wall=350.0)
+    bc.apply_all(u2, v2, p2, T2, smesh)
+    assert np.allclose(T2[-1, :], 350.0),           "patch isothermal failed"
+
+    print("All patch-driven BC assertions passed.")
+    for patch in smesh.patches.values():
+        print(f"  {patch!r}")
 
     sys.exit(0)
