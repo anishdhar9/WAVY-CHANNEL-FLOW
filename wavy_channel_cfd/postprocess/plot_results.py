@@ -20,6 +20,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
 
+from wavy_channel_cfd.geometry.channel_gen import STYLE, apply_axes_style
+
 RESULTS_DIR = Path(__file__).parent.parent / "results"
 
 
@@ -47,6 +49,7 @@ def contour_field(field: np.ndarray, mesh: dict,
     if fig is None:
         fig = ax_.get_figure()
 
+    apply_axes_style(ax_)
     cf = ax_.contourf(mesh["cc_x"], mesh["cc_y"], field, levels=50,
                       cmap="turbo")
     fig.colorbar(cf, ax=ax_, label=label)
@@ -70,12 +73,13 @@ def plot_nusselt_profile(x: np.ndarray, Nu: np.ndarray,
     if fig is None:
         fig = ax_.get_figure()
 
+    apply_axes_style(ax_)
     ax_.plot(x, Nu, label=label)
     ax_.set_xlabel("x [m]")
     ax_.set_ylabel("Nu(x)")
     ax_.set_title("Local Nusselt Number")
     ax_.legend()
-    ax_.grid(True, linestyle="--", alpha=0.5)
+    ax_.grid(True, linestyle="--", alpha=0.35, color=STYLE["grid"])
 
     if filename:
         _save(fig, filename)
@@ -99,6 +103,7 @@ def plot_nu_vs_re(re_list: list[float],
     if fig is None:
         fig = ax_.get_figure()
 
+    apply_axes_style(ax_)
     for lbl, nu_vals in nu_dict.items():
         ax_.plot(re_list, nu_vals, marker="o", label=lbl)
 
@@ -106,7 +111,7 @@ def plot_nu_vs_re(re_list: list[float],
     ax_.set_ylabel(r"$\overline{Nu}$")
     ax_.set_title("Average Nusselt Number vs Reynolds Number")
     ax_.legend(fontsize=8)
-    ax_.grid(True, linestyle="--", alpha=0.5)
+    ax_.grid(True, linestyle="--", alpha=0.35, color=STYLE["grid"])
 
     if filename:
         _save(fig, filename)
@@ -123,6 +128,7 @@ def plot_friction_vs_re(re_list: list[float],
     if fig is None:
         fig = ax_.get_figure()
 
+    apply_axes_style(ax_)
     for lbl, f_vals in f_dict.items():
         ax_.semilogy(re_list, f_vals, marker="s", label=lbl)
 
@@ -130,7 +136,8 @@ def plot_friction_vs_re(re_list: list[float],
     ax_.set_ylabel("Fanning friction factor f")
     ax_.set_title("Friction Factor vs Reynolds Number")
     ax_.legend(fontsize=8)
-    ax_.grid(True, which="both", linestyle="--", alpha=0.5)
+    ax_.grid(True, which="both", linestyle="--", alpha=0.35,
+              color=STYLE["grid"])
 
     if filename:
         _save(fig, filename)
@@ -145,9 +152,10 @@ def plot_tpf_heatmap(ar_list: list[float],
     """Plot a heatmap of TPF over the (AR, phi) parameter space at fixed Re."""
     _ensure_results_dir()
     fig, ax = plt.subplots(figsize=(8, 5))
+    apply_axes_style(ax)
     im = ax.imshow(tpf_matrix, aspect="auto", origin="lower",
                    extent=[phi_list[0], phi_list[-1], ar_list[0], ar_list[-1]],
-                   cmap="RdYlGn", vmin=0.8, vmax=1.5)
+                   cmap="RdBu_r", vmin=0.8, vmax=1.5)
     fig.colorbar(im, ax=ax, label="TPF")
     ax.set_xlabel("Phase φ [°]")
     ax.set_ylabel("Amplitude ratio AR")
@@ -162,4 +170,4 @@ def _save(fig: plt.Figure, stem: str) -> None:
     """Save figure as PNG and PDF to results/."""
     for ext in ("png", "pdf"):
         fig.savefig(RESULTS_DIR / f"{stem}.{ext}",
-                    dpi=150, bbox_inches="tight")
+                    dpi=200, bbox_inches="tight")

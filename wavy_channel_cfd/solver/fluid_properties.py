@@ -170,6 +170,12 @@ def get_properties(config: dict | None = None, **kwargs) -> dict:
     return FluidProperties(**defaults).to_dict()
 
 
+def print_properties(fluid: dict) -> None:
+    """Print a fluid-property dict from ``get_properties`` (legacy API)."""
+    FluidProperties(rho=fluid["rho"], mu=fluid["mu"],
+                    k_f=fluid["k_f"], Cp=fluid["Cp"]).print_summary()
+
+
 def water_properties_polynomial(T_C: float) -> dict:
     """Approximate temperature-dependent properties of water [10 – 80 °C].
 

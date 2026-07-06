@@ -1,16 +1,22 @@
 """
 geometry/channel_gen.py
 
-Parametric wavy-channel geometry with sinusoidal top and bottom walls.
+Parametric 2-D channel geometry defined by a bottom and a top wall curve.
 
-Both walls are corrugated sinusoids; the phase difference phi between them
-controls the channel mode:
+The default constructor builds the classic wavy channel with sinusoidal
+walls; the phase difference phi between them controls the channel mode:
   phi=0°   → in-phase   (constant gap, channel translates bodily)
   phi=180° → anti-phase (converging-diverging, maximum gap oscillation)
+
+Arbitrary 2-D channel shapes are supported through two factory methods:
+  ChannelGeometry.from_profiles(x, y_bottom, y_top)   — tabulated walls
+  ChannelGeometry.from_functions(L, H, f_bot, f_top)  — callable walls
 
 All computations are pure NumPy vectorised operations over the x-array.
 No Python loops over cells.
 """
+
+from typing import Callable
 
 import numpy as np
 import matplotlib
@@ -18,6 +24,33 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 from pathlib import Path
+
+
+# Muted publication palette shared by geometry and mesh plots.
+STYLE = {
+    "wall_bottom": "#1f4e79",   # dark steel blue
+    "wall_top":    "#7b1f1f",   # dark crimson
+    "inlet":       "#1c5e38",   # dark forest green
+    "outlet":      "#8b4a00",   # dark burnt orange
+    "fluid_fill":  "#4a7fa5",
+    "grid":        "#b8b8b8",
+    "axes_bg":     "#f7f7f4",
+    "spine":       "#b0b0b0",
+    "text":        "#333333",
+    "tick":        "#555555",
+}
+
+
+def apply_axes_style(ax: plt.Axes) -> None:
+    """Apply the shared muted figure style to an Axes."""
+    ax.set_facecolor(STYLE["axes_bg"])
+    for spine in ax.spines.values():
+        spine.set_color(STYLE["spine"])
+        spine.set_linewidth(0.8)
+    ax.tick_params(colors=STYLE["tick"], labelsize=9)
+    ax.xaxis.label.set_color(STYLE["text"])
+    ax.yaxis.label.set_color(STYLE["text"])
+    ax.title.set_color(STYLE["text"])
 
 
 class ChannelGeometry:
@@ -61,6 +94,78 @@ class ChannelGeometry:
             k = 2.0 * np.pi / lam
             self.y_bottom = self.A * np.sin(k * self.x)
             self.y_top    = H + self.A * np.sin(k * self.x + self.phi_rad)
+
+    # ------------------------------------------------------------------
+    # General-geometry factories
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_profiles(cls, x: np.ndarray,
+                      y_bottom: np.ndarray,
+                      y_top: np.ndarray) -> "ChannelGeometry":
+        """Build a channel from tabulated wall profiles.
+
+        Accepts arbitrary single-valued wall curves y_bottom(x), y_top(x)
+        sampled on a common, strictly increasing x-array. The mesh
+        generator interpolates these profiles, so any 2-D channel whose
+        walls are functions of x can be meshed this way.
+
+        Parameters
+        ----------
+        x        : (n,) strictly increasing streamwise coordinates [m]
+        y_bottom : (n,) bottom wall y-coordinates [m]
+        y_top    : (n,) top wall y-coordinates [m]
+        """
+        x        = np.asarray(x,        dtype=float)
+        y_bottom = np.asarray(y_bottom, dtype=float)
+        y_top    = np.asarray(y_top,    dtype=float)
+
+        if x.ndim != 1 or x.size < 2:
+            raise ValueError("x must be a 1-D array with at least 2 points")
+        if y_bottom.shape != x.shape or y_top.shape != x.shape:
+            raise ValueError(
+                f"Wall profiles must match x: x{x.shape}, "
+                f"y_bottom{y_bottom.shape}, y_top{y_top.shape}")
+        if np.any(np.diff(x) <= 0):
+            raise ValueError("x must be strictly increasing")
+        if np.any(y_top <= y_bottom):
+            i = int(np.argmin(y_top - y_bottom))
+            raise ValueError(
+                f"y_top must lie above y_bottom everywhere; walls cross "
+                f"at x = {x[i]:.6g} m (gap = {(y_top - y_bottom)[i]:.3g} m)")
+
+        geom = cls.__new__(cls)
+        geom.L        = float(x[-1] - x[0])
+        geom.H        = float(np.mean(y_top - y_bottom))
+        geom.lam      = geom.L                 # no intrinsic wavelength
+        geom.AR       = 0.0
+        geom.phi_deg  = 0.0
+        geom.A        = 0.0
+        geom.phi_rad  = 0.0
+        geom.n_pts    = int(x.size)
+        geom.x        = x - x[0]               # normalise to start at x=0
+        geom.y_bottom = y_bottom
+        geom.y_top    = y_top
+        return geom
+
+    @classmethod
+    def from_functions(cls, L: float,
+                       f_bottom: Callable[[np.ndarray], np.ndarray],
+                       f_top: Callable[[np.ndarray], np.ndarray],
+                       n_pts: int = 500) -> "ChannelGeometry":
+        """Build a channel from callable wall shape functions.
+
+        Parameters
+        ----------
+        L        : channel length [m]
+        f_bottom : vectorised y_bottom(x) callable [m]
+        f_top    : vectorised y_top(x) callable [m]
+        n_pts    : number of sample points along x
+        """
+        x = np.linspace(0.0, float(L), int(n_pts))
+        yb = np.broadcast_to(np.asarray(f_bottom(x), dtype=float), x.shape)
+        yt = np.broadcast_to(np.asarray(f_top(x),    dtype=float), x.shape)
+        return cls.from_profiles(x, yb, yt)
 
     # ------------------------------------------------------------------
     # Validity check
@@ -143,18 +248,24 @@ class ChannelGeometry:
         x_hi   = self.L * 1e3
 
         fig, ax = plt.subplots(figsize=(11, 3.2))
+        apply_axes_style(ax)
 
         # Channel interior fill
-        ax.fill_between(x_mm, yb_mm, yt_mm,
-                        alpha=0.18, color="steelblue", label="fluid domain")
+        ax.fill_between(x_mm, yb_mm, yt_mm, alpha=0.12,
+                        color=STYLE["fluid_fill"], lw=0,
+                        label="fluid domain")
 
         # Wall lines
-        ax.plot(x_mm, yb_mm, color="royalblue",  lw=1.8, label="bottom wall")
-        ax.plot(x_mm, yt_mm, color="firebrick",   lw=1.8, label="top wall")
+        ax.plot(x_mm, yb_mm, color=STYLE["wall_bottom"], lw=1.6,
+                label="bottom wall")
+        ax.plot(x_mm, yt_mm, color=STYLE["wall_top"], lw=1.6,
+                label="top wall")
 
         # Inlet / outlet verticals
-        ax.axvline(x_lo, color="seagreen",  ls="--", lw=1.3, label="inlet")
-        ax.axvline(x_hi, color="darkorange", ls="--", lw=1.3, label="outlet")
+        ax.axvline(x_lo, color=STYLE["inlet"],  ls="--", lw=1.2,
+                   label="inlet")
+        ax.axvline(x_hi, color=STYLE["outlet"], ls="--", lw=1.2,
+                   label="outlet")
 
         # ── Amplitude annotation (only for wavy cases) ────────────────
         if self.AR > 0.0:
@@ -165,22 +276,25 @@ class ChannelGeometry:
             # We annotate the amplitude A relative to the zero line
             ax.annotate(
                 "", xy=(x_ann_mm, self.A * 1e3), xytext=(x_ann_mm, 0.0),
-                arrowprops=dict(arrowstyle="<->", color="navy", lw=1.2),
+                arrowprops=dict(arrowstyle="<->",
+                                color=STYLE["wall_bottom"], lw=1.1),
             )
             ax.text(x_ann_mm + x_hi * 0.012, self.A * 1e3 / 2.0,
                     f"A = {self.A * 1e3:.2f} mm",
-                    fontsize=8, color="navy", va="center")
+                    fontsize=8, color=STYLE["wall_bottom"], va="center")
 
             # Wavelength bracket just above the top wall peak
             y_bracket = yt_mm.max() + margin * 0.55
             ax.annotate(
                 "", xy=(self.lam * 1e3, y_bracket),
                 xytext=(0.0, y_bracket),
-                arrowprops=dict(arrowstyle="<->", color="darkred", lw=1.2),
+                arrowprops=dict(arrowstyle="<->",
+                                color=STYLE["wall_top"], lw=1.1),
             )
             ax.text(self.lam * 1e3 / 2.0, y_bracket + margin * 0.18,
                     f"λ = {self.lam * 1e3:.1f} mm",
-                    fontsize=8, color="darkred", ha="center", va="bottom")
+                    fontsize=8, color=STYLE["wall_top"],
+                    ha="center", va="bottom")
 
         ax.set_xlim(x_lo, x_hi)
         ax.set_ylim(y_lo, y_hi)
@@ -193,14 +307,15 @@ class ChannelGeometry:
                  f"λ = {self.lam * 1e3:.1f} mm")
         ax.set_title(title, fontsize=10)
         ax.legend(loc="upper right", fontsize=8, ncol=3,
-                  framealpha=0.7, edgecolor="grey")
-        ax.grid(True, linestyle=":", alpha=0.4)
+                  framealpha=0.9, edgecolor="#cccccc",
+                  labelcolor=STYLE["text"])
+        ax.grid(True, linestyle=":", alpha=0.35, color=STYLE["grid"])
         fig.tight_layout()
 
         if save_path is not None:
             save_path = Path(save_path)
             save_path.parent.mkdir(parents=True, exist_ok=True)
-            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+            fig.savefig(save_path, dpi=200, bbox_inches="tight")
             plt.close(fig)
 
         return fig
